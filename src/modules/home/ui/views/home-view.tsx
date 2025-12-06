@@ -12,6 +12,18 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  SidebarProvider,
+  Sidebar,
+  SidebarContent,
+  SidebarGroup,
+  SidebarGroupLabel,
+  SidebarMenu,
+  SidebarMenuItem,
+  SidebarMenuButton,
+  SidebarFooter,
+  SidebarRail,
+} from "@/components/ui/sidebar";
 
 // Types for API responses
 interface Folder {
@@ -53,13 +65,18 @@ export default function HomeView() {
   const [folderName, setFolderName] = useState("");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  // Upload CSV dialog state
+  const [isUploadOpen, setIsUploadOpen] = useState(false);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   // trigger list reloads after mutations
   const [reloadTick, setReloadTick] = useState(0);
 
-  // NEW: unified backend base URL (database url as requested)
-  const NEXT_PUBLIC_DATABASE_URL = (() => {
+  // Use NEXT_PUBLIC_BACKEND_URL for all backend requests
+  const NEXT_PUBLIC_BACKEND_URL = (() => {
     let u =
-      process.env.NEXT_PUBLIC_DATABASE_URL ||
+      process.env.NEXT_PUBLIC_BACKEND_URL ||
       "https://pythonbackend-xbase.onrender.com";
     u = u.trim();
     if (!/^https?:\/\//i.test(u)) u = "https://" + u;
@@ -74,10 +91,9 @@ export default function HomeView() {
   ): Promise<Response | null> => {
     try {
       return await fetch(input, {
-        // mode & credentials left default; CORS negotiated automatically
+        // mode & credentials default to allow CORS negotiation
         ...init,
         headers: {
-          // keep only needed header to reduce preflight complexity
           "Content-Type":
             (init?.headers as any)?.["Content-Type"] || "application/json",
         },
@@ -89,7 +105,7 @@ export default function HomeView() {
         return safeFetch(input, init, retries - 1, delayMs * 2);
       }
       setApiError(
-        `Network error contacting backend: ${NEXT_PUBLIC_DATABASE_URL}`
+        `Network error contacting backend: ${NEXT_PUBLIC_BACKEND_URL}`
       );
       return null;
     }
@@ -100,11 +116,11 @@ export default function HomeView() {
     setApiError(null);
     const userId = data?.user?.id;
     if (!userId) return;
-    if (!NEXT_PUBLIC_DATABASE_URL) {
+    if (!NEXT_PUBLIC_BACKEND_URL) {
       setApiError("Backend URL not configured.");
       return;
     }
-    const res = await safeFetch(`${NEXT_PUBLIC_DATABASE_URL}/root`, {
+    const res = await safeFetch(`${NEXT_PUBLIC_BACKEND_URL}/root`, {
       method: "POST",
       body: JSON.stringify({ user_id: userId }),
     });
@@ -123,7 +139,7 @@ export default function HomeView() {
     console.log("Root response payload:", payload);
     if (payload?.root_id) setCurrentFolderId(payload.root_id);
     else setApiError("root_id missing in response.");
-  }, [data?.user?.id, NEXT_PUBLIC_DATABASE_URL]);
+  }, [data?.user?.id, NEXT_PUBLIC_BACKEND_URL]);
 
   // When user id becomes available, ensure we have a root
   useEffect(() => {
@@ -139,7 +155,7 @@ export default function HomeView() {
     }
   }, [current_folder_id, data?.user?.id, ensureRoot]);
 
-  // Fetch folders/files for the current folder (ensure root first if missing)
+  // Fetch folders/files for current folder on visit and after mutations
   useEffect(() => {
     const fetchLists = async () => {
       if (!data?.user?.id) return;
@@ -147,15 +163,15 @@ export default function HomeView() {
         await ensureRoot();
         return;
       }
-      if (!NEXT_PUBLIC_DATABASE_URL) return;
+      if (!NEXT_PUBLIC_BACKEND_URL) return;
 
       setApiError(null);
       const [foldersRes, filesRes] = await Promise.all([
-        safeFetch(`${NEXT_PUBLIC_DATABASE_URL}/folders`, {
+        safeFetch(`${NEXT_PUBLIC_BACKEND_URL}/folders`, {
           method: "POST",
           body: JSON.stringify({ current_folder_id }),
         }),
-        safeFetch(`${NEXT_PUBLIC_DATABASE_URL}/files`, {
+        safeFetch(`${NEXT_PUBLIC_BACKEND_URL}/files`, {
           method: "POST",
           body: JSON.stringify({ current_folder_id }),
         }),
@@ -199,7 +215,7 @@ export default function HomeView() {
   }, [
     current_folder_id,
     data?.user?.id,
-    NEXT_PUBLIC_DATABASE_URL,
+    NEXT_PUBLIC_BACKEND_URL,
     ensureRoot,
     reloadTick,
   ]);
@@ -214,7 +230,7 @@ export default function HomeView() {
   const toSlug = (label: string) =>
     `/${label.toLowerCase().replace(/\s+/g, "-")}`;
 
-  // Create Folder handler
+  // Create Folder handler -> refresh list
   const handleCreateFolder = async () => {
     setCreateError(null);
     if (!folderName.trim()) {
@@ -226,7 +242,7 @@ export default function HomeView() {
       return;
     }
     setCreating(true);
-    const res = await safeFetch(`${NEXT_PUBLIC_DATABASE_URL}/folder/create`, {
+    const res = await safeFetch(`${NEXT_PUBLIC_BACKEND_URL}/folder/create`, {
       method: "POST",
       body: JSON.stringify({
         folder_name: folderName.trim(),
@@ -247,6 +263,79 @@ export default function HomeView() {
     setFolderName("");
     setReloadTick((t) => t + 1);
   };
+
+  // Upload CSV -> create file record -> refresh list
+  const handleCsvUpload = async () => {
+    setUploadError(null);
+    if (!uploadFile) {
+      setUploadError("Please select a CSV file.");
+      return;
+    }
+    const isCsv =
+      uploadFile.type === "text/csv" ||
+      uploadFile.name.toLowerCase().endsWith(".csv");
+    if (!isCsv) {
+      setUploadError("Only .csv files are allowed.");
+      return;
+    }
+    const form = new FormData();
+    form.append("file", uploadFile);
+    try {
+      setUploading(true);
+      const res = await fetch("/api/upload", { method: "POST", body: form });
+      if (!res.ok) {
+        setUploading(false);
+        setUploadError(`Upload failed (${res.status})`);
+        return;
+      }
+      const data: { path: string; url: string } = await res.json();
+      console.log("Uploaded:", data);
+
+      // Immediately create file record in backend with bucket_url
+      if (!current_folder_id) {
+        setUploading(false);
+        setUploadError("Invalid parent folder.");
+        return;
+      }
+      const createRes = await safeFetch(
+        `${NEXT_PUBLIC_BACKEND_URL}/files/create`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name: uploadFile.name,
+            current_folder_id,
+            bucket_url: data.url,
+          }),
+        }
+      );
+      if (!createRes) {
+        setUploading(false);
+        setUploadError("Network error while creating file record.");
+        return;
+      }
+      if (!createRes.ok) {
+        setUploading(false);
+        setUploadError(`Create file failed (${createRes.status})`);
+        return;
+      }
+      const created = await createRes.json();
+      console.log("File record created:", created);
+
+      setUploading(false);
+      setIsUploadOpen(false);
+      setUploadFile(null);
+      setReloadTick((t) => t + 1);
+    } catch (e) {
+      setUploading(false);
+      setUploadError("Network error while uploading.");
+    }
+  };
+
+  // shared classes for neon transitions
+  const neonBtn =
+    "text-base md:text-lg px-4 py-3 text-neutral-300 hover:text-[#39FF14] transition-colors duration-200";
+  const activeGradient =
+    "bg-gradient-to-r from-[#39FF14] to-neutral-800 text-white";
 
   return (
     <div className="min-h-screen bg-neutral-900 text-white flex flex-col">
@@ -280,233 +369,314 @@ export default function HomeView() {
         </header>
       )}
 
-      {/* Sidebar + Content */}
-      <div className="flex flex-1">
-        <aside className="w-64 border-r border-neutral-800 p-4 h-full overflow-y-auto">
-          <nav className="h-full flex flex-col">
-            {/* Top: Primary */}
-            <div className="mb-6">
-              <div className="px-3 mb-3 text-sm md:text-base uppercase tracking-wider text-neutral-400">
-                Primary
-              </div>
-              <div className="space-y-1">
-                <button
-                  className={`w-full text-left px-4 py-3 text-lg rounded-md hover:bg-neutral-800 ${
-                    activeItem === "My Database"
-                      ? "bg-neutral-800 font-semibold"
-                      : "text-neutral-300"
-                  }`}
-                  onClick={() => setActiveItem("My Database")}
-                >
-                  My Database
-                </button>
-                <button
-                  className="w-full text-left px-4 py-3 text-lg rounded-md hover:bg-neutral-800 text-neutral-300"
-                  onClick={() => router.push(toSlug("Ask AI"))}
-                >
-                  Ask AI
-                </button>
-              </div>
-            </div>
-
-            {/* Middle: centered (Data Processing + Analytics) */}
-            <div className="flex-1 flex flex-col justify-center gap-8">
-              <div>
-                <div className="px-3 mb-3 text-sm md:text-base uppercase tracking-wider text-neutral-400">
-                  Data Processing
-                </div>
-                <div className="space-y-1">
-                  <button
-                    className="w-full text-left px-4 py-3 text-lg rounded-md hover:bg-neutral-800 text-neutral-300"
-                    onClick={() => router.push(toSlug("Data Cleaning"))}
-                  >
-                    Data Cleaning
-                  </button>
-                  <button
-                    className="w-full text-left px-4 py-3 text-lg rounded-md hover:bg-neutral-800 text-neutral-300"
-                    onClick={() => router.push(toSlug("Impute Data"))}
-                  >
-                    Impute Data
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <div className="px-3 mb-3 text-sm md:text-base uppercase tracking-wider text-neutral-400">
-                  Analytics
-                </div>
-                <div className="space-y-1">
-                  <button
-                    className="w-full text-left px-4 py-3 text-lg rounded-md hover:bg-neutral-800 text-neutral-300"
-                    onClick={() => router.push(toSlug("Visualisation"))}
-                  >
-                    Visualisation
-                  </button>
-                  <button
-                    className="w-full text-left px-4 py-3 text-lg rounded-md hover:bg-neutral-800 text-neutral-300"
-                    onClick={() => router.push(toSlug("Classification"))}
-                  >
-                    Classification
-                  </button>
-                  <button
-                    className="w-full text-left px-4 py-3 text-lg rounded-md hover:bg-neutral-800 text-neutral-300"
-                    onClick={() => router.push(toSlug("Association Rules"))}
-                  >
-                    Association Rules
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Bottom: History */}
-            <div className="mt-6">
-              <div className="px-3 mb-3 text-sm md:text-base uppercase tracking-wider text-neutral-400">
-                History
-              </div>
-              <div className="space-y-1">
-                <button
-                  className="w-full text-left px-4 py-3 text-lg rounded-md hover:bg-neutral-800 text-neutral-300"
-                  onClick={() => router.push(toSlug("Snapshot History"))}
-                >
-                  Snapshot History
-                </button>
-              </div>
-            </div>
-          </nav>
-        </aside>
-
-        <main className="flex-1 p-6">
-          {apiError && (
-            <div className="mb-4 rounded-md border border-red-700 bg-red-900/40 px-4 py-2 text-sm text-red-300">
-              {apiError}
-            </div>
-          )}
-          {activeItem === "My Database" && (
-            <>
-              <div className="mb-4 flex items-center gap-3">
-                <Button
-                  type="button"
-                  className="bg-neutral-800 hover:bg-neutral-700 text-white"
-                  onClick={() => {
-                    setCreateError(null);
-                    setIsCreateOpen(true);
-                  }}
-                >
-                  Create Folder
-                </Button>
-                <Button
-                  type="button"
-                  className="bg-neutral-800 hover:bg-neutral-700 text-white"
-                >
-                  Create File
-                </Button>
-                <Button
-                  type="button"
-                  className="bg-neutral-800 hover:bg-neutral-700 text-white"
-                >
-                  Upload File
-                </Button>
-              </div>
-
-              {/* Create Folder Dialog */}
-              <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
-                <DialogContent className="bg-neutral-900 text-white border border-neutral-800">
-                  <DialogHeader>
-                    <DialogTitle>Create new folder</DialogTitle>
-                  </DialogHeader>
-                  <div className="space-y-2">
-                    <Input
-                      value={folderName}
-                      onChange={(e) => setFolderName(e.target.value)}
-                      placeholder="Enter folder name"
-                      className="bg-neutral-800 border-neutral-700 text-white placeholder:text-neutral-400"
-                      disabled={creating}
-                    />
-                    {createError && (
-                      <p className="text-sm text-red-400">{createError}</p>
-                    )}
-                  </div>
-                  <DialogFooter className="gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="border-neutral-700 text-black"
-                      onClick={() => setIsCreateOpen(false)}
-                      disabled={creating}
+      {/* Sidebar + Content (shadcn/ui Sidebar) */}
+      <SidebarProvider>
+        <div className="flex flex-1">
+          <Sidebar className="bg-neutral-900/90 backdrop-blur border-r border-neutral-800">
+            <SidebarContent className="bg-neutral-900/90">
+              {/* Primary (top) */}
+              <SidebarGroup>
+                <SidebarGroupLabel className="px-3 mb-3 text-sm md:text-base uppercase tracking-wider text-neutral-400">
+                  Primary
+                </SidebarGroupLabel>
+                <SidebarMenu>
+                  <SidebarMenuItem>
+                    <SidebarMenuButton
+                      isActive={activeItem === "My Database"}
+                      onClick={() => setActiveItem("My Database")}
+                      className={`${neonBtn} ${
+                        activeItem === "My Database" ? activeGradient : ""
+                      }`}
                     >
-                      Cancel
-                    </Button>
-                    <Button
-                      type="button"
-                      className="bg-[#39FF14] text-black hover:bg-[#2fd310]"
-                      onClick={handleCreateFolder}
-                      disabled={creating}
+                      My Database
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                  <SidebarMenuItem>
+                    <SidebarMenuButton
+                      onClick={() => router.push(toSlug("Ask AI"))}
+                      className={neonBtn}
                     >
-                      {creating ? "Creating..." : "Create"}
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
+                      Ask AI
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                </SidebarMenu>
+              </SidebarGroup>
 
-              {/* Folders */}
-              {folders.length > 0 && (
-                <section className="mb-8">
-                  {/* <h2 className="mb-3 text-sm uppercase tracking-wide text-neutral-400">
+              {/* Data Processing + Analytics (middle, spaced) */}
+              <div className="my-6">
+                <SidebarGroup>
+                  <SidebarGroupLabel className="px-3 mb-3 text-sm md:text-base uppercase tracking-wider text-neutral-400">
+                    Data Processing
+                  </SidebarGroupLabel>
+                  <SidebarMenu>
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        onClick={() => router.push(toSlug("Data Cleaning"))}
+                        className={neonBtn}
+                      >
+                        Data Cleaning
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        onClick={() => router.push(toSlug("Impute Data"))}
+                        className={neonBtn}
+                      >
+                        Impute Data
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  </SidebarMenu>
+                </SidebarGroup>
+
+                <SidebarGroup className="mt-6">
+                  <SidebarGroupLabel className="px-3 mb-3 text-sm md:text-base uppercase tracking-wider text-neutral-400">
+                    Analytics
+                  </SidebarGroupLabel>
+                  <SidebarMenu>
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        onClick={() => router.push(toSlug("Visualisation"))}
+                        className={neonBtn}
+                      >
+                        Visualisation
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        onClick={() => router.push(toSlug("Classification"))}
+                        className={neonBtn}
+                      >
+                        Classification
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                    <SidebarMenuItem>
+                      <SidebarMenuButton
+                        onClick={() => router.push(toSlug("Association Rules"))}
+                        className={neonBtn}
+                      >
+                        Association Rules
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  </SidebarMenu>
+                </SidebarGroup>
+              </div>
+            </SidebarContent>
+
+            {/* History (bottom) */}
+            <SidebarFooter className="bg-neutral-900/90 border-t border-neutral-800">
+              <SidebarGroup>
+                <SidebarGroupLabel className="px-3 mb-3 text-sm md:text-base uppercase tracking-wider text-neutral-400">
+                  History
+                </SidebarGroupLabel>
+                <SidebarMenu>
+                  <SidebarMenuItem>
+                    <SidebarMenuButton
+                      onClick={() => router.push(toSlug("Snapshot History"))}
+                      className={neonBtn}
+                    >
+                      Snapshot History
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                </SidebarMenu>
+              </SidebarGroup>
+            </SidebarFooter>
+            <SidebarRail className="bg-neutral-900/80" />
+          </Sidebar>
+
+          <main className="flex-1 p-6">
+            {apiError && (
+              <div className="mb-4 rounded-md border border-red-700 bg-red-900/40 px-4 py-2 text-sm text-red-300">
+                {apiError}
+              </div>
+            )}
+            {activeItem === "My Database" && (
+              <>
+                <div className="mb-4 flex items-center gap-3">
+                  <Button
+                    type="button"
+                    className="bg-neutral-800 hover:bg-neutral-700 text-white"
+                    onClick={() => {
+                      setCreateError(null);
+                      setIsCreateOpen(true);
+                    }}
+                  >
+                    Create Folder
+                  </Button>
+                  <Button
+                    type="button"
+                    className="bg-neutral-800 hover:bg-neutral-700 text-white"
+                  >
+                    Create File
+                  </Button>
+                  <Button
+                    type="button"
+                    className="bg-neutral-800 hover:bg-neutral-700 text-white"
+                    onClick={() => {
+                      setUploadError(null);
+                      setUploadFile(null);
+                      setIsUploadOpen(true);
+                    }}
+                  >
+                    Upload File
+                  </Button>
+                </div>
+
+                {/* Create Folder Dialog */}
+                <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+                  <DialogContent className="bg-neutral-900 text-white border border-neutral-800">
+                    <DialogHeader>
+                      <DialogTitle>Create new folder</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-2">
+                      <Input
+                        value={folderName}
+                        onChange={(e) => setFolderName(e.target.value)}
+                        placeholder="Enter folder name"
+                        className="bg-neutral-800 border-neutral-700 text-white placeholder:text-neutral-400"
+                        disabled={creating}
+                      />
+                      {createError && (
+                        <p className="text-sm text-red-400">{createError}</p>
+                      )}
+                    </div>
+                    <DialogFooter className="gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="border-neutral-700 text-black"
+                        onClick={() => setIsCreateOpen(false)}
+                        disabled={creating}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        type="button"
+                        className="bg-[#39FF14] text-black hover:bg-[#2fd310]"
+                        onClick={handleCreateFolder}
+                        disabled={creating}
+                      >
+                        {creating ? "Creating..." : "Create"}
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+
+                {/* Upload CSV Dialog */}
+                <Dialog open={isUploadOpen} onOpenChange={setIsUploadOpen}>
+                  <DialogContent className="bg-neutral-900 text-white border border-neutral-800">
+                    <DialogHeader>
+                      <DialogTitle>Upload CSV to Supabase</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-2">
+                      <input
+                        type="file"
+                        accept=".csv,text/csv"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0] ?? null;
+                          if (!f) {
+                            setUploadFile(null);
+                            return;
+                          }
+                          const isCsv =
+                            f.type === "text/csv" ||
+                            f.name.toLowerCase().endsWith(".csv");
+                          if (!isCsv) {
+                            setUploadError("Only .csv files are allowed.");
+                            setUploadFile(null);
+                          } else {
+                            setUploadError(null);
+                            setUploadFile(f);
+                          }
+                        }}
+                        className="block w-full text-sm file:mr-4 file:rounded-md file:border-0 file:bg-neutral-800 file:px-4 file:py-2 file:text-white hover:file:bg-neutral-700"
+                        disabled={uploading}
+                      />
+                      {uploadError && (
+                        <p className="text-sm text-red-400">{uploadError}</p>
+                      )}
+                    </div>
+                    <DialogFooter className="gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="border-neutral-700 text-black"
+                        onClick={() => setIsUploadOpen(false)}
+                        disabled={uploading}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        type="button"
+                        className="bg-[#39FF14] text-black hover:bg-[#2fd310]"
+                        onClick={handleCsvUpload}
+                        disabled={uploading || !uploadFile}
+                      >
+                        {uploading ? "Uploading..." : "Upload"}
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+
+                {/* Folders */}
+                {folders.length > 0 && (
+                  <section className="mb-8">
+                    {/* <h2 className="mb-3 text-sm uppercase tracking-wide text-neutral-400">
                     Folders
                   </h2> */}
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-                    {folders.map((f) => (
-                      <button
-                        key={f.id}
-                        onClick={() => setCurrentFolderId(f.id)}
-                        className="flex flex-col items-center gap-2 p-3 rounded-md hover:bg-neutral-800/60 transition-colors"
-                        title={f.name}
-                      >
-                        <img
-                          src="/folder-icon.png"
-                          alt="Folder"
-                          className="h-16 w-16 object-contain"
-                        />
-                        <span className="text-sm text-neutral-200 truncate w-full text-center">
-                          {f.name}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </section>
-              )}
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                      {folders.map((f) => (
+                        <button
+                          key={f.id}
+                          onClick={() => setCurrentFolderId(f.id)}
+                          className="flex flex-col items-center gap-2 p-3 rounded-md hover:bg-neutral-800/60 transition-colors"
+                          title={f.name}
+                        >
+                          <img
+                            src="/folder-icon.png"
+                            alt="Folder"
+                            className="h-16 w-16 object-contain"
+                          />
+                          <span className="text-sm text-neutral-200 truncate w-full text-center">
+                            {f.name}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                )}
 
-              {/* Files */}
-              {files.length > 0 && (
-                <section>
-                  <h2 className="mb-3 text-sm uppercase tracking-wide text-neutral-400">
-                    Files
-                  </h2>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-                    {files.map((file) => (
-                      <div
-                        key={file.id}
-                        className="flex flex-col items-center gap-2 p-3 rounded-md hover:bg-neutral-800/40 transition-colors"
-                        title={file.name}
-                      >
-                        <img
-                          src="/file-icon.png"
-                          alt="File"
-                          className="h-16 w-16 object-contain"
-                        />
-                        <span className="text-sm text-neutral-200 truncate w-full text-center">
-                          {file.name}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
-            </>
-          )}
-          {/* ...existing or future content... */}
-        </main>
-      </div>
+                {/* Files (rendered after folders) */}
+                {files.length > 0 && (
+                  <section>
+                    <h2 className="mb-3 text-sm uppercase tracking-wide text-neutral-400">
+                      Files
+                    </h2>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                      {files.map((file) => (
+                        <div
+                          key={file.id}
+                          className="flex flex-col items-center gap-2 p-3 rounded-md hover:bg-neutral-800/40 transition-colors"
+                          title={file.name}
+                        >
+                          <img
+                            src="/file-icon.png"
+                            alt="File"
+                            className="h-16 w-16 object-contain"
+                          />
+                          <span className="text-sm text-neutral-200 truncate w-full text-center">
+                            {file.name}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+              </>
+            )}
+            {/* ...existing or future content... */}
+          </main>
+        </div>
+      </SidebarProvider>
     </div>
   );
 }
