@@ -4,10 +4,7 @@ export const runtime = "nodejs";
 
 const BUCKET = process.env.SUPABASE_BUCKET || "XBase_bucket1";
 
-export async function GET(
-  req: Request,
-  { params }: { params: { path: string[] } }
-) {
+export async function GET(req: Request, context: any) {
   try {
     const supabase = createClient(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -43,12 +40,15 @@ export async function GET(
         return new Response("Invalid URL parameter", { status: 400 });
       }
     } else {
-      const segments = Array.isArray(params?.path) ? params.path : [];
+      const params = (context && context.params) || {};
+      const segments: string[] = Array.isArray(params.path) ? params.path : [];
       filePath = segments.join("/");
     }
 
     if (!filePath) {
-      console.error("API/files: Missing file path", { params });
+      console.error("API/files: Missing file path", {
+        params: context?.params,
+      });
       return new Response("Missing file path", { status: 400 });
     }
 
