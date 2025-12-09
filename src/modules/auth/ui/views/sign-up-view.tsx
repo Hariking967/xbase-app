@@ -93,7 +93,7 @@ export default function SignUpView() {
   };
 
   return (
-    <div className="relative min-h-screen flex flex-col items-center justify-center gap-6 bg-black text-white">
+    <div className="relative min-h-screen flex flex-col items-center justify-center gap-6 bg-neutral-900 text-white">
       <div className="absolute inset-0 z-0">
         <DotGrid
           dotSize={8}
@@ -230,20 +230,20 @@ export default function SignUpView() {
                 </div>
                 <div className="grid grid-cols-2 gap-4 mb-0.5s">
                   <Button
-                    className="bg-black w-full h-12 text-lg text-white"
+                    className="bg-neutral-800 w-full h-12 text-lg text-white"
                     variant="outline"
                     type="button"
                     onClick={() => onSocial("google")}
                   >
-                    <FaGoogle className="bg-black size-5" />
+                    <FaGoogle className="size-5" />
                   </Button>
                   <Button
-                    className="bg-black w-full h-12 text-lg text-white"
+                    className="bg-neutral-800 w-full h-12 text-lg text-white"
                     variant="outline"
                     type="button"
                     onClick={() => onSocial("github")}
                   >
-                    <FaGithub className="bg-black size-5" />
+                    <FaGithub className="size-5" />
                   </Button>
                 </div>
                 <div className="text-center text-sm text-white">
@@ -256,12 +256,12 @@ export default function SignUpView() {
               </div>
             </form>
           </Form>
-          <div className="bg-gradient-to-br from-black via-black to-[#39FF14] relative hidden md:flex flex-col gap-y-4 items-center justify-center h-full w-full p-6">
+          <div className="bg-gradient-to-br from-neutral-900 via-neutral-900 to-[#39FF14] relative hidden md:flex flex-col gap-y-4 items-center justify-center h-full w-full p-6">
             <img
               src="/logo-bg.png"
               alt="logo"
               className="h-[120px] w-[120px] rounded-2xl"
-            ></img>
+            />
             <p className="text-3xl font-semibold text-white">XBase</p>
           </div>
         </CardContent>

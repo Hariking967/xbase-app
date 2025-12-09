@@ -12,6 +12,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   SidebarProvider,
   Sidebar,
@@ -24,6 +25,8 @@ import {
   SidebarFooter,
   SidebarRail,
 } from "@/components/ui/sidebar";
+import CSVFileView from "./csv-file-view";
+import Papa from "papaparse";
 
 // Types for API responses
 interface Folder {
@@ -70,8 +73,30 @@ export default function HomeView() {
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  // Create File dialog state
+  const [isCreateFileOpen, setIsCreateFileOpen] = useState(false);
+  const [newFileName, setNewFileName] = useState("");
+  const [newFileDesc, setNewFileDesc] = useState("");
+  const [creatingFile, setCreatingFile] = useState(false);
+  const [createFileError, setCreateFileError] = useState<string | null>(null);
   // trigger list reloads after mutations
   const [reloadTick, setReloadTick] = useState(0);
+  const [rootId, setRootId] = useState<string | null>(null);
+  const [breadcrumbs, setBreadcrumbs] = useState<
+    Array<{ id: string; name: string }>
+  >([]);
+  const [selectedFile, setSelectedFile] = useState<DbFile | null>(null);
+  const [isFileView, setIsFileView] = useState<number>(0);
+  // DataSpark chat state
+  const [chatHistory, setChatHistory] = useState<string[]>([]);
+  const [userQuery, setUserQuery] = useState("");
+  const [sending, setSending] = useState(false);
+  const [csvColumns, setCsvColumns] = useState<string[]>([]);
+  const [lastAIResponse, setLastAIResponse] = useState<string>("");
+  // NEW: per-file chat pairs
+  const [fileSpecificChatHistory, setFileSpecificChatHistory] = useState<
+    Array<{ user: string; ai: string }>
+  >([]);
 
   // Use NEXT_PUBLIC_BACKEND_URL for all backend requests
   const NEXT_PUBLIC_BACKEND_URL = (() => {
@@ -137,8 +162,11 @@ export default function HomeView() {
       return;
     }
     console.log("Root response payload:", payload);
-    if (payload?.root_id) setCurrentFolderId(payload.root_id);
-    else setApiError("root_id missing in response.");
+    if (payload?.root_id) {
+      setCurrentFolderId(payload.root_id);
+      setRootId(payload.root_id);
+      setBreadcrumbs([{ id: payload.root_id, name: "Home" }]);
+    } else setApiError("root_id missing in response.");
   }, [data?.user?.id, NEXT_PUBLIC_BACKEND_URL]);
 
   // When user id becomes available, ensure we have a root
@@ -278,8 +306,33 @@ export default function HomeView() {
       setUploadError("Only .csv files are allowed.");
       return;
     }
+
+    // Fetch parent_id (user_root_id) from /root
+    const userId = data?.user?.id;
+    if (!userId) {
+      setUploadError("User not authenticated.");
+      return;
+    }
+    const rootRes = await safeFetch(`${NEXT_PUBLIC_BACKEND_URL}/root`, {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId }),
+    });
+    if (!rootRes || !rootRes.ok) {
+      setUploadError(`Root fetch failed (${rootRes?.status ?? "network"})`);
+      return;
+    }
+    const rootPayload = await rootRes.json();
+    const user_root_id =
+      typeof rootPayload === "string" ? rootPayload : rootPayload?.root_id;
+    if (!user_root_id) {
+      setUploadError("root_id missing in response.");
+      return;
+    }
+
     const form = new FormData();
     form.append("file", uploadFile);
+    form.append("parent_id", user_root_id);
+
     try {
       setUploading(true);
       const res = await fetch("/api/upload", { method: "POST", body: form });
@@ -291,7 +344,6 @@ export default function HomeView() {
       const data: { path: string; url: string } = await res.json();
       console.log("Uploaded:", data);
 
-      // Immediately create file record in backend with bucket_url
       if (!current_folder_id) {
         setUploading(false);
         setUploadError("Invalid parent folder.");
@@ -331,6 +383,181 @@ export default function HomeView() {
     }
   };
 
+  // Create File with AI + record in files table
+  const handleCreateFileWithAI = async () => {
+    setCreateFileError(null);
+    if (!current_folder_id) {
+      setCreateFileError("Invalid parent folder.");
+      return;
+    }
+    if (!newFileName.trim() || !newFileDesc.trim()) {
+      setCreateFileError("Name and description are required.");
+      return;
+    }
+    setCreatingFile(true);
+    try {
+      // 1) Ask AI
+      const askBody = {
+        db_info: "",
+        query: `Table name: ${newFileName.trim()} description: ${newFileDesc.trim()}`,
+        chat_history: [],
+        parent_id: current_folder_id,
+      };
+      const askRes = await safeFetch(`${NEXT_PUBLIC_BACKEND_URL}/ask_ai`, {
+        method: "POST",
+        body: JSON.stringify(askBody),
+      });
+      if (!askRes || !askRes.ok) {
+        setCreatingFile(false);
+        setCreateFileError(`Ask AI failed (${askRes?.status ?? "network"})`);
+        return;
+      }
+
+      // NEW: persist chat_history in session cookie
+      let askData: any = null;
+      try {
+        askData = await askRes.json();
+      } catch {
+        // ignore parse errors; continue with subsequent steps
+      }
+      const history = askData?.chat_history ?? [];
+      try {
+        await fetch("/api/chat-history", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ history }),
+        });
+      } catch {
+        // non-blocking; continue
+      }
+
+      // 2) Get user_root_id
+      const userId = data?.user?.id;
+      if (!userId) {
+        setCreatingFile(false);
+        setCreateFileError("User not authenticated.");
+        return;
+      }
+      const rootRes = await safeFetch(`${NEXT_PUBLIC_BACKEND_URL}/root`, {
+        method: "POST",
+        body: JSON.stringify({ user_id: userId }),
+      });
+      if (!rootRes || !rootRes.ok) {
+        setCreatingFile(false);
+        setCreateFileError(
+          `Root fetch failed (${rootRes?.status ?? "network"})`
+        );
+        return;
+      }
+      const rootPayload = await rootRes.json();
+      const user_root_id =
+        typeof rootPayload === "string" ? rootPayload : rootPayload?.root_id;
+      if (!user_root_id) {
+        setCreatingFile(false);
+        setCreateFileError("root_id missing in response.");
+        return;
+      }
+
+      // 3) Create file record
+      const bucket_url = `schema${user_root_id}|>${newFileName.trim()}`;
+      const createRes = await safeFetch(
+        `${NEXT_PUBLIC_BACKEND_URL}/files/create`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            current_folder_id,
+            name: newFileName.trim(),
+            bucket_url,
+          }),
+        }
+      );
+      if (!createRes || !createRes.ok) {
+        setCreatingFile(false);
+        setCreateFileError(
+          `Create file failed (${createRes?.status ?? "network"})`
+        );
+        return;
+      }
+
+      // Success: close dialog, reset inputs, refresh lists
+      setIsCreateFileOpen(false);
+      setNewFileName("");
+      setNewFileDesc("");
+      setCreatingFile(false);
+      setReloadTick((t) => t + 1);
+    } catch (e) {
+      setCreatingFile(false);
+      setCreateFileError("Network error during file creation.");
+    }
+  };
+
+  // Click a folder card: update current_folder_id + breadcrumbs
+  const enterFolder = (f: Folder) => {
+    setCurrentFolderId(f.id);
+    setBreadcrumbs((prev) => {
+      // avoid duplicate consecutive entries
+      if (prev.find((b) => b.id === f.id)) return [...prev];
+      return [...prev, { id: f.id, name: f.name }];
+    });
+  };
+
+  // Click a breadcrumb segment: jump there and trim trail
+  const jumpToCrumb = (index: number) => {
+    const target = breadcrumbs[index];
+    if (!target) return;
+    setCurrentFolderId(target.id);
+    setBreadcrumbs((prev) => prev.slice(0, index + 1));
+  };
+
+  // Ask AI using documented POST /ask_ai
+  const askAIChat = async () => {
+    if (!selectedFile || !current_folder_id) return;
+    const trimmed = userQuery.trim();
+    if (!trimmed) return;
+    setSending(true);
+
+    const dbInfo =
+      csvColumns.length > 0 ? `columns: ${csvColumns.join(", ")}` : "";
+
+    try {
+      const outgoingHistory = [...chatHistory, `USER: ${trimmed}`];
+
+      const res = await safeFetch(`${NEXT_PUBLIC_BACKEND_URL}/ask_ai`, {
+        method: "POST",
+        body: JSON.stringify({
+          db_info: dbInfo,
+          query: trimmed,
+          chat_history: outgoingHistory,
+          parent_id: current_folder_id,
+        }),
+      });
+      if (!res || !res.ok) {
+        setSending(false);
+        return;
+      }
+      const data = await res.json();
+
+      const nextHistory: string[] = Array.isArray(data?.chat_history)
+        ? data.chat_history
+        : outgoingHistory;
+      setChatHistory(nextHistory);
+
+      const aiText = typeof data?.response === "string" ? data.response : "";
+      setLastAIResponse(aiText);
+
+      // NEW: append exact pair for this file
+      setFileSpecificChatHistory((prev) => [
+        ...prev,
+        { user: trimmed, ai: aiText },
+      ]);
+
+      setUserQuery("");
+      setSending(false);
+    } catch {
+      setSending(false);
+    }
+  };
+
   // shared classes for neon transitions
   const neonBtn =
     "text-base md:text-lg px-4 py-3 text-neutral-300 hover:text-[#39FF14] transition-colors duration-200";
@@ -338,7 +565,7 @@ export default function HomeView() {
     "bg-gradient-to-r from-[#39FF14] to-neutral-800 text-white";
 
   return (
-    <div className="min-h-screen bg-neutral-900 text-white flex flex-col">
+    <div className="h-screen bg-neutral-900 text-white flex flex-col">
       {!!data?.user && (
         <header className="w-full bg-neutral-900 text-white border-b border-neutral-800">
           <div className="w-full px-4 py-3 flex items-center justify-between">
@@ -369,9 +596,8 @@ export default function HomeView() {
         </header>
       )}
 
-      {/* Sidebar + Content (shadcn/ui Sidebar) */}
       <SidebarProvider>
-        <div className="flex flex-1">
+        <div className="flex flex-1 min-h-0">
           <Sidebar className="bg-neutral-900/90 backdrop-blur border-r border-neutral-800">
             <SidebarContent className="bg-neutral-900/90">
               {/* Primary (top) */}
@@ -483,43 +709,77 @@ export default function HomeView() {
             <SidebarRail className="bg-neutral-900/80" />
           </Sidebar>
 
-          <main className="flex-1 p-6">
+          {/* Make main a full-height flex column */}
+          <main className="flex-1 flex flex-col p-6 overflow-hidden min-h-0 bg-neutral-900">
             {apiError && (
               <div className="mb-4 rounded-md border border-red-700 bg-red-900/40 px-4 py-2 text-sm text-red-300">
                 {apiError}
               </div>
             )}
+
+            {/* Breadcrumbs (hidden in file view) */}
+            {breadcrumbs.length > 0 && isFileView === 0 && (
+              <div className="mb-4 flex flex-wrap items-center gap-3 text-2xl">
+                {breadcrumbs.map((crumb, i) => (
+                  <div key={crumb.id} className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      className={`hover:text-[#39FF14] ${
+                        i === breadcrumbs.length - 1 ? "font-bold" : ""
+                      }`}
+                      onClick={() => jumpToCrumb(i)}
+                      title={crumb.name}
+                    >
+                      {crumb.name}
+                    </button>
+                    {i < breadcrumbs.length - 1 && (
+                      <span className="text-neutral-500 text-2xl">›</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
             {activeItem === "My Database" && (
               <>
-                <div className="mb-4 flex items-center gap-3">
-                  <Button
-                    type="button"
-                    className="bg-neutral-800 hover:bg-neutral-700 text-white"
-                    onClick={() => {
-                      setCreateError(null);
-                      setIsCreateOpen(true);
-                    }}
-                  >
-                    Create Folder
-                  </Button>
-                  <Button
-                    type="button"
-                    className="bg-neutral-800 hover:bg-neutral-700 text-white"
-                  >
-                    Create File
-                  </Button>
-                  <Button
-                    type="button"
-                    className="bg-neutral-800 hover:bg-neutral-700 text-white"
-                    onClick={() => {
-                      setUploadError(null);
-                      setUploadFile(null);
-                      setIsUploadOpen(true);
-                    }}
-                  >
-                    Upload File
-                  </Button>
-                </div>
+                {/* Top actions (hidden in file view) */}
+                {isFileView === 0 && (
+                  <div className="mb-4 flex items-center gap-3">
+                    <Button
+                      type="button"
+                      className="bg-neutral-800 hover:bg-neutral-700 text-white"
+                      onClick={() => {
+                        setCreateError(null);
+                        setIsCreateOpen(true);
+                      }}
+                    >
+                      Create Folder
+                    </Button>
+                    <Button
+                      type="button"
+                      className="bg-neutral-800 hover:bg-neutral-700 text-white"
+                      onClick={() => {
+                        setCreateFileError(null);
+                        setNewFileName("");
+                        setNewFileDesc("");
+                        setIsCreateFileOpen(true);
+                      }}
+                    >
+                      Create File
+                    </Button>
+                    <Button
+                      type="button"
+                      className="bg-neutral-800 hover:bg-neutral-700 text-white"
+                      onClick={() => {
+                        setUploadError(null);
+                        setUploadFile(null);
+                        setIsUploadOpen(true);
+                      }}
+                    >
+                      Upload File
+                    </Button>
+                  </div>
+                )}
 
                 {/* Create Folder Dialog */}
                 <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
@@ -561,11 +821,63 @@ export default function HomeView() {
                   </DialogContent>
                 </Dialog>
 
+                {/* Create File Dialog */}
+                <Dialog
+                  open={isCreateFileOpen}
+                  onOpenChange={setIsCreateFileOpen}
+                >
+                  <DialogContent className="bg-neutral-900 text-white border border-neutral-800">
+                    <DialogHeader>
+                      <DialogTitle>Create new file</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-3">
+                      <Input
+                        value={newFileName}
+                        onChange={(e) => setNewFileName(e.target.value)}
+                        placeholder="Enter file (table) name"
+                        className="bg-neutral-800 border-neutral-700 text-white placeholder:text-neutral-400"
+                        disabled={creatingFile}
+                      />
+                      <Textarea
+                        value={newFileDesc}
+                        onChange={(e) => setNewFileDesc(e.target.value)}
+                        placeholder="Eg: create file named student with columns roll_no int and marks int"
+                        className="min-h-24 bg-neutral-800 border-neutral-700 text-white placeholder:text-neutral-400"
+                        disabled={creatingFile}
+                      />
+                      {createFileError && (
+                        <p className="text-sm text-red-400">
+                          {createFileError}
+                        </p>
+                      )}
+                    </div>
+                    <DialogFooter className="gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="border-neutral-700 text-black"
+                        onClick={() => setIsCreateFileOpen(false)}
+                        disabled={creatingFile}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        type="button"
+                        className="bg-[#39FF14] text-black hover:bg-[#2fd310]"
+                        onClick={handleCreateFileWithAI}
+                        disabled={creatingFile}
+                      >
+                        {creatingFile ? "Creating..." : "Create"}
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+
                 {/* Upload CSV Dialog */}
                 <Dialog open={isUploadOpen} onOpenChange={setIsUploadOpen}>
                   <DialogContent className="bg-neutral-900 text-white border border-neutral-800">
                     <DialogHeader>
-                      <DialogTitle>Upload CSV to Supabase</DialogTitle>
+                      <DialogTitle>Upload CSV</DialogTitle>
                     </DialogHeader>
                     <div className="space-y-2">
                       <input
@@ -617,60 +929,109 @@ export default function HomeView() {
                   </DialogContent>
                 </Dialog>
 
-                {/* Folders */}
-                {folders.length > 0 && (
-                  <section className="mb-8">
-                    {/* <h2 className="mb-3 text-sm uppercase tracking-wide text-neutral-400">
+                {/* If a file is selected, render FileView */}
+                <div className="flex-1 h-full overflow-hidden min-h-0">
+                  {selectedFile ? (
+                    <div className="w-full h-full relative">
+                      <CSVFileView
+                        file={selectedFile}
+                        onBack={() => {
+                          setSelectedFile(null);
+                          setIsFileView(0);
+                          setChatHistory([]);
+                          setUserQuery("");
+                          setCsvColumns([]);
+                          setLastAIResponse("");
+                          // NEW: clear per-file chat pairs
+                          setFileSpecificChatHistory([]);
+                        }}
+                        chatHistory={chatHistory}
+                        userQuery={userQuery}
+                        sending={sending}
+                        csvColumns={csvColumns}
+                        onUserQueryChange={setUserQuery}
+                        onSend={askAIChat}
+                        onColumnsChange={setCsvColumns}
+                        aiResponse={lastAIResponse}
+                        // NEW: pass per-file chat pairs
+                        fileSpecificChatHistory={fileSpecificChatHistory}
+                      />
+                    </div>
+                  ) : (
+                    <div className="p-4 overflow-auto h-full">
+                      {/* Folders */}
+                      {folders.length > 0 && (
+                        <section className="mb-8">
+                          {/* <h2 className="mb-3 text-sm uppercase tracking-wide text-neutral-400">
                     Folders
                   </h2> */}
-                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-                      {folders.map((f) => (
-                        <button
-                          key={f.id}
-                          onClick={() => setCurrentFolderId(f.id)}
-                          className="flex flex-col items-center gap-2 p-3 rounded-md hover:bg-neutral-800/60 transition-colors"
-                          title={f.name}
-                        >
-                          <img
-                            src="/folder-icon.png"
-                            alt="Folder"
-                            className="h-16 w-16 object-contain"
-                          />
-                          <span className="text-sm text-neutral-200 truncate w-full text-center">
-                            {f.name}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  </section>
-                )}
+                          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                            {folders.map((f) => (
+                              <button
+                                key={f.id}
+                                onClick={() => enterFolder(f)}
+                                className="flex flex-col items-center gap-2 p-3 rounded-md hover:bg-neutral-800/60 transition-colors"
+                                title={f.name}
+                              >
+                                <img
+                                  src="/folder-icon.png"
+                                  alt="Folder"
+                                  className="h-24 w-24 object-contain"
+                                />
+                                <span className="text-sm text-neutral-200 truncate w-full text-center">
+                                  {f.name}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        </section>
+                      )}
 
-                {/* Files (rendered after folders) */}
-                {files.length > 0 && (
-                  <section>
-                    {/* <h2 className="mb-3 text-sm uppercase tracking-wide text-neutral-400">
+                      {/* Files */}
+                      {files.length > 0 && (
+                        <section>
+                          {/* <h2 className="mb-3 text-sm uppercase tracking-wide text-neutral-400">
                       Files
                     </h2> */}
-                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-                      {files.map((file) => (
-                        <div
-                          key={file.id}
-                          className="flex flex-col items-center gap-2 p-3 rounded-md hover:bg-neutral-800/40 transition-colors"
-                          title={file.name}
-                        >
-                          <img
-                            src="/file-icon.png"
-                            alt="File"
-                            className="h-16 w-16 object-contain"
-                          />
-                          <span className="text-sm text-neutral-200 truncate w-full text-center">
-                            {file.name}
-                          </span>
-                        </div>
-                      ))}
+                          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                            {files.map((file) => {
+                              const isSchema =
+                                typeof file.bucket_url === "string" &&
+                                file.bucket_url
+                                  .toLowerCase()
+                                  .includes("schema");
+                              const iconSrc = isSchema
+                                ? "/table-icon.png"
+                                : "/file-icon.png";
+                              return (
+                                <button
+                                  key={file.id}
+                                  onClick={() => {
+                                    setSelectedFile(file);
+                                    setIsFileView(1);
+                                    setChatHistory([]);
+                                    setUserQuery("");
+                                  }}
+                                  className="flex flex-col items-center gap-2 p-3 rounded-md hover:bg-neutral-800/40 transition-colors"
+                                  title={file.name}
+                                >
+                                  <img
+                                    src={iconSrc}
+                                    alt={isSchema ? "Table" : "File"}
+                                    className="h-24 w-24 object-contain"
+                                  />
+                                  <span className="text-sm text-neutral-200 truncate w-full text-center">
+                                    {file.name}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </section>
+                      )}
                     </div>
-                  </section>
-                )}
+                  )}
+                </div>
               </>
             )}
             {/* ...existing or future content... */}

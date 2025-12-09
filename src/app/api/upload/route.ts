@@ -14,16 +14,26 @@ export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
     const file: File | null = formData.get("file") as unknown as File;
+    const parent_id: string | null = formData.get("parent_id") as string | null;
 
     if (!file) {
       return NextResponse.json({ error: "No file provided" }, { status: 400 });
     }
-
+    if (
+      !parent_id ||
+      typeof parent_id !== "string" ||
+      parent_id.trim() === ""
+    ) {
+      return NextResponse.json(
+        { error: "No parent_id provided" },
+        { status: 400 }
+      );
+    }
     // Convert File → ArrayBuffer → Uint8Array
     const bytes = await file.arrayBuffer();
     const buffer = new Uint8Array(bytes);
 
-    const filePath = `uploads/${Date.now()}_${file.name}`;
+    const filePath = `${parent_id}` + `/${Date.now()}_${file.name}`;
 
     const { data, error } = await supabase.storage
       .from(BUCKET)
