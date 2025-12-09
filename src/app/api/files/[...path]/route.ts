@@ -1,4 +1,3 @@
-import { NextRequest } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
@@ -6,8 +5,8 @@ export const runtime = "nodejs";
 const BUCKET = process.env.SUPABASE_BUCKET || "XBase_bucket1";
 
 export async function GET(
-  req: NextRequest,
-  { params }: { params: { path?: string[] } }
+  req: Request,
+  { params }: { params: { path: string[] } }
 ) {
   try {
     const supabase = createClient(
@@ -44,7 +43,8 @@ export async function GET(
         return new Response("Invalid URL parameter", { status: 400 });
       }
     } else {
-      filePath = (params.path || []).join("/");
+      const segments = Array.isArray(params?.path) ? params.path : [];
+      filePath = segments.join("/");
     }
 
     if (!filePath) {
