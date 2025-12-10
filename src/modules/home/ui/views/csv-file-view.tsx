@@ -77,7 +77,30 @@ export default function CSVFileView({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [rows, setRows] = useState<Array<Record<string, any>>>([]);
   const [headers, setHeaders] = useState<string[]>([]);
+  // Editing state
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedRows, setEditedRows] = useState<Array<Record<string, any>>>([]);
+  const [editingCell, setEditingCell] = useState<{
+    r: number;
+    c: string;
+  } | null>(null);
 
+  // Helper: extract user_root_id and file_name from public URL
+  const parseBucketUrl = useCallback(() => {
+    try {
+      const u = new URL(file.bucket_url);
+      const parts = u.pathname.split("/"); // .../public/<bucket>/<user_root_id>/<filename>
+      const pubIdx = parts.findIndex((p) => p === "public");
+      const bucket = parts[pubIdx + 1];
+      const userRootId = parts[pubIdx + 2];
+      const fileName = parts.slice(pubIdx + 3).join("/"); // supports nested paths
+      return { bucket, userRootId, fileName };
+    } catch {
+      return { bucket: "", userRootId: "", fileName: "" };
+    }
+  }, [file.bucket_url]);
+
+  // Load CSV content
   useEffect(() => {
     const run = async () => {
       setLoading(true);
@@ -124,6 +147,7 @@ export default function CSVFileView({
             ? (parsed.meta.fields as string[])
             : [];
         setRows(dataRows);
+        setEditedRows(dataRows); // keep a working copy
         setHeaders(keys);
         // NEW: inform parent of columns parsed from the actual CSV content
         if (onColumnsChange) {
@@ -137,6 +161,99 @@ export default function CSVFileView({
     };
     run();
   }, [file.bucket_url, file.name, onColumnsChange]);
+
+  // Double-click to edit a cell
+  const onCellDblClick = (rIdx: number, key: string) => {
+    setEditingCell({ r: rIdx, c: key });
+    setIsEditing(true);
+  };
+
+  // Change cell value
+  const onCellChange = (rIdx: number, key: string, val: string) => {
+    setEditedRows((prev) => {
+      const next = [...prev];
+      const row = { ...next[rIdx] };
+      row[key] = val;
+      next[rIdx] = row;
+      return next;
+    });
+  };
+
+  // Finish edit on Enter or blur
+  const finishEdit = () => {
+    setEditingCell(null);
+  };
+
+  // Generate CSV string from headers + editedRows
+  const toCsv = () => {
+    const lines: string[] = [];
+    lines.push(headers.join(","));
+    for (const row of editedRows) {
+      const fields = headers.map((h) => {
+        const v = row[h] ?? "";
+        const s = String(v);
+        // Quote if contains comma, quote, or newline
+        if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+        return s;
+      });
+      lines.push(fields.join(","));
+    }
+    return lines.join("\n");
+  };
+
+  // Save to Supabase via API
+  const saveEdits = async () => {
+    const { userRootId, fileName, bucket } = parseBucketUrl();
+    if (!userRootId || !fileName) return;
+
+    const csvText = toCsv();
+    const blob = new Blob([csvText], { type: "text/csv" });
+    const fileObj = new File([blob], fileName, { type: "text/csv" });
+
+    const form = new FormData();
+    form.append("file", fileObj);
+    form.append("user_root_id", userRootId);
+    form.append("file_name", fileName);
+
+    // Log where the upsert will happen
+    const base = (process.env.NEXT_PUBLIC_SUPABASE_URL || "").replace(
+      /\/+$/,
+      ""
+    );
+    const publicUrl =
+      bucket && base
+        ? `${base}/storage/v1/object/public/${bucket}/${userRootId}/${fileName}`
+        : `${userRootId}/${fileName}`;
+    console.log("Upserting CSV to storage URL:", publicUrl);
+    console.log("Calling API endpoint:", "/api/files/update");
+
+    try {
+      const res = await fetch("/api/files/update", {
+        method: "POST",
+        body: form,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        console.error("Update failed", {
+          status: res.status,
+          body: text.slice(0, 200),
+        });
+        return;
+      }
+      // Commit editedRows to rows and exit edit mode
+      setRows(editedRows);
+      setIsEditing(false);
+      setEditingCell(null);
+    } catch (e) {
+      console.error("Update error", e);
+    }
+  };
+
+  const cancelEdits = () => {
+    setEditedRows(rows); // revert working copy
+    setIsEditing(false);
+    setEditingCell(null);
+  };
 
   // Send on Enter (without Shift)
   const handleComposerKeyDown = useCallback(
@@ -183,7 +300,7 @@ export default function CSVFileView({
 
             {!loading &&
               !loadError &&
-              rows.length > 0 &&
+              editedRows.length > 0 &&
               headers.length > 0 && (
                 <div className="overflow-auto">
                   <table className="min-w-full text-sm">
@@ -200,16 +317,38 @@ export default function CSVFileView({
                       </tr>
                     </thead>
                     <tbody>
-                      {rows.map((row, idx) => (
-                        <tr key={idx} className="text-neutral-300">
-                          {headers.map((key) => (
-                            <td
-                              key={key}
-                              className="px-3 py-2 border-b border-neutral-800"
-                            >
-                              {String(row[key] ?? "")}
-                            </td>
-                          ))}
+                      {editedRows.map((row, rIdx) => (
+                        <tr key={rIdx} className="text-neutral-300">
+                          {headers.map((key) => {
+                            const isActive =
+                              editingCell &&
+                              editingCell.r === rIdx &&
+                              editingCell.c === key;
+                            return (
+                              <td
+                                key={key}
+                                className="px-3 py-2 border-b border-neutral-800 cursor-pointer"
+                                onDoubleClick={() => onCellDblClick(rIdx, key)}
+                              >
+                                {isActive ? (
+                                  <input
+                                    className="w-full bg-neutral-700 text-white px-2 py-1 rounded-sm outline-none"
+                                    value={String(row[key] ?? "")}
+                                    onChange={(e) =>
+                                      onCellChange(rIdx, key, e.target.value)
+                                    }
+                                    onBlur={finishEdit}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") finishEdit();
+                                    }}
+                                    autoFocus
+                                  />
+                                ) : (
+                                  String(row[key] ?? "")
+                                )}
+                              </td>
+                            );
+                          })}
                         </tr>
                       ))}
                     </tbody>
@@ -217,8 +356,32 @@ export default function CSVFileView({
                 </div>
               )}
 
-            {!loading && !loadError && rows.length === 0 && (
+            {!loading && !loadError && editedRows.length === 0 && (
               <p className="text-neutral-400">No content to display.</p>
+            )}
+
+            {/* Move Save/Cancel inside the content section; right-aligned and sticky so it stays visible when scrolling */}
+            {isEditing && (
+              <div className="sticky bottom-4">
+                <div className="flex justify-end gap-3">
+                  <Button
+                    type="button"
+                    className="bg-neutral-700 hover:bg-neutral-600 text-white"
+                    onClick={cancelEdits}
+                    title="Cancel edits"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    className="bg-[#39FF14] text-black hover:bg-[#2fd310]"
+                    onClick={saveEdits}
+                    title="Save changes"
+                  >
+                    Save
+                  </Button>
+                </div>
+              </div>
             )}
           </div>
         </section>

@@ -26,6 +26,7 @@ import {
   SidebarRail,
 } from "@/components/ui/sidebar";
 import CSVFileView from "./csv-file-view";
+import SQLFileView from "./sql-file-view";
 import Papa from "papaparse";
 
 // Types for API responses
@@ -558,6 +559,17 @@ export default function HomeView() {
     }
   };
 
+  // Helper: decide file type (CSV vs SQL/schema)
+  const isCsvFile = (f: DbFile | null) => {
+    if (!f) return false;
+    const nameCsv =
+      typeof f.name === "string" && f.name.toLowerCase().endsWith(".csv");
+    const urlCsv =
+      typeof f.bucket_url === "string" &&
+      f.bucket_url.toLowerCase().endsWith(".csv");
+    return Boolean(nameCsv || urlCsv);
+  };
+
   // shared classes for neon transitions
   const neonBtn =
     "text-base md:text-lg px-4 py-3 text-neutral-300 hover:text-[#39FF14] transition-colors duration-200";
@@ -933,29 +945,42 @@ export default function HomeView() {
                 <div className="flex-1 h-full overflow-hidden min-h-0">
                   {selectedFile ? (
                     <div className="w-full h-full relative">
-                      <CSVFileView
-                        file={selectedFile}
-                        onBack={() => {
-                          setSelectedFile(null);
-                          setIsFileView(0);
-                          setChatHistory([]);
-                          setUserQuery("");
-                          setCsvColumns([]);
-                          setLastAIResponse("");
-                          // NEW: clear per-file chat pairs
-                          setFileSpecificChatHistory([]);
-                        }}
-                        chatHistory={chatHistory}
-                        userQuery={userQuery}
-                        sending={sending}
-                        csvColumns={csvColumns}
-                        onUserQueryChange={setUserQuery}
-                        onSend={askAIChat}
-                        onColumnsChange={setCsvColumns}
-                        aiResponse={lastAIResponse}
-                        // NEW: pass per-file chat pairs
-                        fileSpecificChatHistory={fileSpecificChatHistory}
-                      />
+                      {isCsvFile(selectedFile) ? (
+                        <CSVFileView
+                          file={selectedFile}
+                          onBack={() => {
+                            setSelectedFile(null);
+                            setIsFileView(0);
+                            setChatHistory([]);
+                            setUserQuery("");
+                            setCsvColumns([]);
+                            setLastAIResponse("");
+                            setFileSpecificChatHistory([]);
+                          }}
+                          chatHistory={chatHistory}
+                          userQuery={userQuery}
+                          sending={sending}
+                          csvColumns={csvColumns}
+                          onUserQueryChange={setUserQuery}
+                          onSend={askAIChat}
+                          onColumnsChange={setCsvColumns}
+                          aiResponse={lastAIResponse}
+                          fileSpecificChatHistory={fileSpecificChatHistory}
+                        />
+                      ) : (
+                        <SQLFileView
+                          file={selectedFile}
+                          onBack={() => {
+                            setSelectedFile(null);
+                            setIsFileView(0);
+                            setChatHistory([]);
+                            setUserQuery("");
+                            setCsvColumns([]);
+                            setLastAIResponse("");
+                            setFileSpecificChatHistory([]);
+                          }}
+                        />
+                      )}
                     </div>
                   ) : (
                     <div className="p-4 overflow-auto h-full">
