@@ -518,16 +518,21 @@ export default function HomeView() {
     setSending(true);
 
     const dbInfo =
-      csvColumns.length > 0 ? `columns: ${csvColumns.join(", ")}` : "";
+      csvColumns.length > 0
+        ? `columns: ${csvColumns.join(", ")}, bucket_url: ${
+            selectedFile.bucket_url
+          }`
+        : `bucket_url: ${selectedFile.bucket_url}`;
 
     try {
       const outgoingHistory = [...chatHistory, `USER: ${trimmed}`];
 
+      const strictQuery = `Return only the table in CSV format with headers. Do not include any narration or extra text. ${trimmed}`;
       const res = await safeFetch(`${NEXT_PUBLIC_BACKEND_URL}/ask_ai`, {
         method: "POST",
         body: JSON.stringify({
           db_info: dbInfo,
-          query: trimmed,
+          query: strictQuery,
           chat_history: outgoingHistory,
           parent_id: current_folder_id,
         }),
@@ -979,6 +984,13 @@ export default function HomeView() {
                             setLastAIResponse("");
                             setFileSpecificChatHistory([]);
                           }}
+                          chatHistory={chatHistory}
+                          userQuery={userQuery}
+                          sending={sending}
+                          onUserQueryChange={setUserQuery}
+                          onSend={askAIChat}
+                          aiResponse={lastAIResponse}
+                          fileSpecificChatHistory={fileSpecificChatHistory}
                         />
                       )}
                     </div>
