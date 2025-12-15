@@ -74,6 +74,8 @@ export default function SQLFileView({
   const [content, setContent] = useState<string>("");
   const [headers, setHeaders] = useState<string[]>([]);
   const [rows, setRows] = useState<Array<Record<string, any>>>([]);
+  // Trigger left-pane re-fetch when DataSpark chat updates
+  const [chatRefreshTick, setChatRefreshTick] = useState(0);
 
   const handleComposerKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -104,146 +106,68 @@ export default function SQLFileView({
     const fetchSqlPreview = async () => {
       setLoading(true);
       setLoadError(null);
-      setContent("");
-      setHeaders([]);
-      setRows([]);
+      let nextHeaders: string[] = [];
+      let nextRows: Array<Record<string, any>> = [];
       try {
         const NEXT_PUBLIC_BACKEND_URL =
           process.env.NEXT_PUBLIC_BACKEND_URL || "";
-        // First, request only column names with DEV_NEEDS for strict formatting
-        const query =
-          "Return only the column names of the current table as a comma-separated list in a single line with no extra text. (DEV_NEEDS)";
-        const res = await fetch(`${NEXT_PUBLIC_BACKEND_URL}/ask_ai`, {
+        // 1) Get Rows first
+        const rowsRes = await fetch(`${NEXT_PUBLIC_BACKEND_URL}/getRows`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Accept: "application/json",
           },
           body: JSON.stringify({
-            db_info: dbInfo,
-            query,
-            chat_history: [],
             parent_id: file.parent_id,
+            table_name: tablePart,
           }),
         });
-        if (!res || !res.ok) {
-          const text = res ? await res.text().catch(() => "") : "";
-          throw new Error(text || "Failed to fetch SQL content");
+        if (!rowsRes.ok) {
+          const body = await rowsRes.text().catch(() => "");
+          console.error("[SQLFileView] getRows error", rowsRes.status, body);
+          throw new Error(`getRows failed (${rowsRes.status})`);
         }
-        const data = await res.json();
-        console.log("AskAI columns (DEV_NEEDS) response:");
-        console.log(data);
+        const rowsJson = await rowsRes.json();
+        const rawRows: any[][] = Array.isArray(rowsJson?.rows)
+          ? (rowsJson.rows as any[][])
+          : [];
 
-        // FIX: define aiText before using it
-        const aiText = typeof data?.response === "string" ? data.response : "";
-
-        // Parse column names from a comma-separated string; do NOT set rows here
-        if (aiText) {
-          const cols = aiText
-            .split(/\s*[,|]\s*/)
-            .map((c: string) => c.trim())
-            .filter((s: string) => Boolean(s));
-          if (cols.length > 0) {
-            setHeaders(cols);
-          }
-        }
-
-        // After columns, request full table rows via select all with DEV_NEEDS
-        const resCols = await fetch(`${NEXT_PUBLIC_BACKEND_URL}/ask_ai`, {
+        // 2) Then Get Columns
+        const colsRes = await fetch(`${NEXT_PUBLIC_BACKEND_URL}/getColumns`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Accept: "application/json",
           },
           body: JSON.stringify({
-            db_info: dbInfo,
-            query: tablePart
-              ? `Select all rows from ${tablePart}. (DEV_NEEDS)`
-              : "Select all rows from the current table. (DEV_NEEDS)",
-            chat_history: [],
             parent_id: file.parent_id,
+            table_name: tablePart,
           }),
         });
-        if (resCols && resCols.ok) {
-          const dataCols = await resCols.json();
-          console.log("AskAI select-all (DEV_NEEDS) response:");
-          console.log(dataCols);
-          const sqlRes = Array.isArray(dataCols?.sql_res)
-            ? (dataCols.sql_res as Array<Record<string, any>>)
-            : [];
-          if (sqlRes.length > 0) {
-            const keys = Object.keys(sqlRes[0] || {});
-            setHeaders(keys);
-            setRows(sqlRes);
-          } else {
-            const txt =
-              typeof dataCols?.response === "string" ? dataCols.response : "";
-            const parsed =
-              txt && txt.includes(",")
-                ? Papa.parse(txt.trim(), { header: true })
-                : ({ data: [], meta: { fields: [] } } as any);
-            const dataRows = Array.isArray((parsed as any).data)
-              ? ((parsed as any).data as any[]) || []
-              : [];
-            const keys =
-              dataRows.length > 0
-                ? Object.keys(dataRows[0])
-                : Array.isArray((parsed as any).meta?.fields)
-                ? ((parsed as any).meta.fields as string[]) || []
-                : [];
-            setRows(dataRows);
-            setHeaders(keys.filter(Boolean));
-          }
-        } else {
-          // Do not render narrative content from the columns call; keep UI clean
-          setRows([]);
-          setHeaders((headers) => headers);
+        if (!colsRes.ok) {
+          const body = await colsRes.text().catch(() => "");
+          console.error("[SQLFileView] getColumns error", colsRes.status, body);
+          throw new Error(`getColumns failed (${colsRes.status})`);
         }
+        const colsJson = await colsRes.json();
+        const columns: string[] = Array.isArray(colsJson?.columns)
+          ? (colsJson.columns as string[])
+          : [];
 
-        // If neither sql_res nor parsed csv from the second call produced rows,
-        // try to parse the primary response body as CSV to render a simple table.
-        if (rows.length === 0 && headers.length === 0) {
-          const fallbackRes = await fetch(`${NEXT_PUBLIC_BACKEND_URL}/ask_ai`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "application/json",
-            },
-            body: JSON.stringify({
-              db_info: dbInfo,
-              query: "Return the selected result as raw CSV (DEV_NEEDS).",
-              chat_history: [],
-              parent_id: file.parent_id,
-            }),
-          });
-          if (fallbackRes && fallbackRes.ok) {
-            const fb = await fallbackRes.json();
-            console.log("AskAI fallback CSV response:");
-            console.log(fb);
-            const raw =
-              typeof fb?.response === "string" ? fb.response.trim() : "";
-            if (raw && /[,]/.test(raw) && /\n/.test(raw)) {
-              const parsed = Papa.parse(raw, {
-                header: true,
-                skipEmptyLines: true,
-              });
-              const dataRows = Array.isArray(parsed.data)
-                ? (parsed.data as any[])
-                : [];
-              const keys =
-                dataRows.length > 0
-                  ? Object.keys(dataRows[0])
-                  : Array.isArray(parsed.meta?.fields)
-                  ? (parsed.meta.fields as string[])
-                  : [];
-              if (keys.length > 0) setHeaders(keys);
-              if (dataRows.length > 0) setRows(dataRows);
-            } else {
-              setContent(raw);
-            }
+        // Map raw rows (arrays) to objects using columns
+        nextHeaders = columns;
+        nextRows = rawRows.map((arr) => {
+          const obj: Record<string, any> = {};
+          for (let i = 0; i < columns.length; i++) {
+            obj[columns[i]] = arr[i];
           }
-        }
+          return obj;
+        });
 
+        setHeaders(nextHeaders);
+        setRows(nextRows);
+        setContent("");
         setLoading(false);
       } catch (err: any) {
         setLoadError(err?.message || "Failed to load SQL content");
@@ -251,7 +175,7 @@ export default function SQLFileView({
       }
     };
     fetchSqlPreview();
-  }, [file.parent_id, file.bucket_url]);
+  }, [file.parent_id, file.bucket_url, chatRefreshTick]);
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 bg-neutral-900">
@@ -389,6 +313,7 @@ export default function SQLFileView({
               // keep existing history view in sync
               fileSpecificChatHistory.push(pair);
             }}
+            onChatChange={() => setChatRefreshTick((t) => t + 1)}
           />
 
           {/* Composer moved inside DataSparkChat */}
@@ -404,11 +329,13 @@ function DataSparkChat({
   parentId,
   initialUserQuery,
   onAppendHistory,
+  onChatChange,
 }: {
   bucketUrl: string;
   parentId: string;
   initialUserQuery: string;
   onAppendHistory: (pair: { user: string; ai: string }) => void;
+  onChatChange?: (pairs: Array<{ user: string; ai: string }>) => void;
 }) {
   const [localQuery, setLocalQuery] = useState(initialUserQuery || "");
   const [sending, setSending] = useState(false);
@@ -475,7 +402,14 @@ function DataSparkChat({
       setImageBox(nextImageBox);
 
       // Update local current_chat list for rendering in DataSpark
-      setCurrentChat((prev) => [...prev, { user: q, ai: aiText }]);
+      setCurrentChat((prev) => {
+        const next = [...prev, { user: q, ai: aiText }];
+        // Notify parent so it can re-obtain left pane data
+        try {
+          onChatChange && onChatChange(next);
+        } catch {}
+        return next;
+      });
       // Keep parent fileSpecificChatHistory in sync as before
       onAppendHistory({ user: q, ai: aiText });
       setLocalQuery("");
@@ -483,7 +417,15 @@ function DataSparkChat({
     } catch {
       setSending(false);
     }
-  }, [localQuery, chatHistory, imageBox, bucketUrl, parentId, onAppendHistory]);
+  }, [
+    localQuery,
+    chatHistory,
+    imageBox,
+    bucketUrl,
+    parentId,
+    onAppendHistory,
+    onChatChange,
+  ]);
 
   return (
     <div className="flex flex-col h-full">
@@ -498,7 +440,7 @@ function DataSparkChat({
               <div className="rounded-md px-3 py-2 text-sm whitespace-pre-wrap bg-neutral-700 text-neutral-50">
                 {turn.user}
               </div>
-              <div className="rounded-md px-3 py-2 text-sm whitespace-pre-wrap bg-\[#123d16\] text-\[#39FF14\]">
+              <div className="rounded-md px-3 py-2 text-sm whitespace-pre-wrap bg-[#123d16] text-[#39FF14]">
                 {turn.ai}
               </div>
             </div>

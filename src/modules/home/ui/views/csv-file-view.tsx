@@ -160,7 +160,12 @@ export default function CSVFileView({
       }
     };
     run();
-  }, [file.bucket_url, file.name, onColumnsChange]);
+  }, [
+    file.bucket_url,
+    file.name,
+    onColumnsChange,
+    fileSpecificChatHistory.length,
+  ]);
 
   // Double-click to edit a cell
   const onCellDblClick = (rIdx: number, key: string) => {
@@ -408,49 +413,150 @@ export default function CSVFileView({
             <h3 className="text-lg font-semibold text-white">DataSpark ✨</h3>
           </div>
 
-          {/* Chat area: render exact pairs from FileSpecificChatHistory */}
-          <div className="flex-1 min-h-0 overflow-auto rounded-md border border-neutral-800 bg-neutral-900 p-3 space-y-3">
-            {fileSpecificChatHistory.length === 0 ? (
-              <div className="text-neutral-400 text-sm">
-                Ask questions about this file. Context will include:{" "}
-                {(headers.length ? headers : csvColumns).join(", ") ||
-                  "no columns detected"}
-                .
-              </div>
-            ) : (
-              fileSpecificChatHistory.map((turn, idx) => (
-                <div key={idx} className="space-y-2">
-                  <div className="rounded-md px-3 py-2 text-sm whitespace-pre-wrap bg-neutral-700 text-neutral-50">
-                    {turn.user}
-                  </div>
-                  <div className="rounded-md px-3 py-2 text-sm whitespace-pre-wrap bg-[#123d16] text-[#39FF14]">
-                    {turn.ai}
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-
-          {/* Composer */}
-          <div className="flex items-center gap-2 pt-2 mb-5">
-            <Input
-              value={userQuery}
-              onChange={(e) => onUserQueryChange(e.target.value)}
-              onKeyDown={handleComposerKeyDown}
-              placeholder="Type your question..."
-              className="flex-1 bg-neutral-800 border-neutral-700 text-white placeholder:text-neutral-400"
-              disabled={sending}
-            />
-            <Button
-              className="bg-[#39FF14] text-black hover:bg-[#2fd310]"
-              disabled={sending}
-              onClick={onSend}
-            >
-              {sending ? "Sending..." : "Send"}
-            </Button>
-          </div>
+          {/* DataSpark chat with bucket_url-aware sending */}
+          <CSVDataSparkChat
+            bucketUrl={file.bucket_url}
+            parentId={file.parent_id}
+            headersHint={headers.length ? headers : csvColumns}
+            initialUserQuery={userQuery}
+            sendingExternal={sending}
+            onUpdateQuery={onUserQueryChange}
+            onAppendHistory={(pair) => {
+              fileSpecificChatHistory.push(pair);
+            }}
+          />
         </aside>
       </div>
     </div>
+  );
+}
+
+// Lightweight DataSpark chat for CSV view that always sends bucket_url to /ask_ai
+function CSVDataSparkChat({
+  bucketUrl,
+  parentId,
+  headersHint,
+  initialUserQuery,
+  sendingExternal,
+  onUpdateQuery,
+  onAppendHistory,
+}: {
+  bucketUrl: string;
+  parentId: string;
+  headersHint: string[];
+  initialUserQuery: string;
+  sendingExternal: boolean;
+  onUpdateQuery: (v: string) => void;
+  onAppendHistory: (pair: { user: string; ai: string }) => void;
+}) {
+  const [localQuery, setLocalQuery] = useState(initialUserQuery || "");
+  const [sending, setSending] = useState(false);
+  const [currentChat, setCurrentChat] = useState<
+    Array<{ user: string; ai: string }>
+  >([]);
+
+  useEffect(() => {
+    // keep external query in sync
+    onUpdateQuery(localQuery);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localQuery]);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (sending || sendingExternal) return;
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        void send();
+      }
+    },
+    [sending, sendingExternal, localQuery, bucketUrl, parentId]
+  );
+
+  const send = useCallback(async () => {
+    const q = localQuery.trim();
+    if (!q) return;
+    setSending(true);
+    try {
+      const NEXT_PUBLIC_BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "";
+      // Derive filename from bucket URL
+      let fileName = "";
+      try {
+        const u = new URL(bucketUrl);
+        const pathParts = u.pathname.split("/").filter(Boolean);
+        fileName = pathParts[pathParts.length - 1] || "";
+      } catch {
+        // Fallbacks
+        const parts = bucketUrl.split("/");
+        fileName = parts[parts.length - 1] || bucketUrl;
+      }
+      const res = await fetch(`${NEXT_PUBLIC_BACKEND_URL}/ask_ai`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          db_info: `CSV file: ${fileName}`,
+          bucket_url: bucketUrl,
+          query: q,
+          chat_history: [],
+          parent_id: parentId,
+        }),
+      });
+      if (!res || !res.ok) {
+        setSending(false);
+        return;
+      }
+      const data = await res.json();
+      const aiText = typeof data?.response === "string" ? data.response : "";
+      setCurrentChat((prev) => [...prev, { user: q, ai: aiText }]);
+      onAppendHistory({ user: q, ai: aiText });
+      setLocalQuery("");
+      setSending(false);
+    } catch {
+      setSending(false);
+    }
+  }, [localQuery, headersHint, bucketUrl, parentId, onAppendHistory]);
+
+  return (
+    <>
+      <div className="flex-1 min-h-0 overflow-auto rounded-md border border-neutral-800 bg-neutral-900 p-3 space-y-3">
+        {currentChat.length === 0 ? (
+          <div className="text-neutral-400 text-sm">
+            Ask questions about this file. Context will include:{" "}
+            {headersHint.join(", ") || "no columns detected"}.
+          </div>
+        ) : (
+          currentChat.map((turn, idx) => (
+            <div key={idx} className="space-y-2">
+              <div className="rounded-md px-3 py-2 text-sm whitespace-pre-wrap bg-neutral-700 text-neutral-50">
+                {turn.user}
+              </div>
+              <div className="rounded-md px-3 py-2 text-sm whitespace-pre-wrap bg-[#123d16] text-[#39FF14]">
+                {turn.ai}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+
+      <div className="flex items-center gap-2 pt-2 mb-5">
+        <Input
+          value={localQuery}
+          onChange={(e) => setLocalQuery(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Type your question..."
+          className="flex-1 bg-neutral-800 border-neutral-700 text-white placeholder:text-neutral-400"
+          disabled={sending || sendingExternal}
+        />
+        <Button
+          className="bg-[#39FF14] text-black hover:bg-[#2fd310]"
+          disabled={sending || sendingExternal}
+          onClick={() => void send()}
+        >
+          {sending || sendingExternal ? "Sending..." : "Send"}
+        </Button>
+      </div>
+    </>
   );
 }
