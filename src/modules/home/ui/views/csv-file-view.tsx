@@ -489,6 +489,16 @@ function CSVDataSparkChat({
         const parts = bucketUrl.split("/");
         fileName = parts[parts.length - 1] || bucketUrl;
       }
+      console.log(
+        "db_info:\n" +
+          `CSV:\n` +
+          `File: ${fileName}\n` +
+          "Columns: " +
+          `${headersHint.join(", ")}` +
+          "\n" +
+          "bucket_url:" +
+          bucketUrl.split("/").slice(-2).join("/")
+      );
       const res = await fetch(`${NEXT_PUBLIC_BACKEND_URL}/ask_ai`, {
         method: "POST",
         headers: {
@@ -496,7 +506,14 @@ function CSVDataSparkChat({
           Accept: "application/json",
         },
         body: JSON.stringify({
-          db_info: `CSV file: ${fileName}`,
+          db_info:
+            `CSV:\n` +
+            `File: ${fileName}\n` +
+            "Columns: " +
+            `${headersHint.join(", ")}` +
+            "\n" +
+            "bucket_url:" +
+            bucketUrl.split("/").slice(-2).join("/"),
           bucket_url: bucketUrl,
           query: q,
           chat_history: [],

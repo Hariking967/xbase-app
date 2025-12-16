@@ -585,8 +585,10 @@ export default function HomeView() {
     <div className="h-screen bg-neutral-900 text-white flex flex-col">
       {!!data?.user && (
         <header className="w-full bg-neutral-900 text-white border-b border-neutral-800">
-          <div className="w-full px-4 py-3 flex items-center justify-between">
-            <div className="flex items-center gap-3">
+          <div className="w-full px-4 py-3 grid grid-cols-3 items-center">
+            {/* Left placeholder to allow perfect centering */}
+            <div />
+            <div className="flex items-center gap-3 justify-self-center">
               <img
                 src="/logo-bg.png"
                 alt="XBase"
@@ -594,7 +596,7 @@ export default function HomeView() {
               />
               <span className="font-semibold text-2xl">XBase</span>
             </div>
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-4 justify-self-end">
               <span className="text-xl">{data?.user?.name ?? "User"}</span>
               <Button
                 className="h-8 bg-red-600 text-white hover:bg-red-700 border-transparent"

@@ -346,6 +346,51 @@ function DataSparkChat({
     Array<{ user: string; ai: string }>
   >([]);
 
+  // Derive table name from bucketUrl like: schema<user_root_id>|><table_name>
+  const tableName = (bucketUrl.split("|>")[1] || "").trim();
+
+  // Fetch table columns client-side (no async component body)
+  const [columns, setColumns] = useState<string[]>([]);
+  const [colsError, setColsError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      try {
+        setColsError(null);
+        const NEXT_PUBLIC_BACKEND_URL =
+          process.env.NEXT_PUBLIC_BACKEND_URL || "";
+        if (!NEXT_PUBLIC_BACKEND_URL || !tableName) {
+          setColumns([]);
+          return;
+        }
+        const res = await fetch(`${NEXT_PUBLIC_BACKEND_URL}/getColumns`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({ parent_id: parentId, table_name: tableName }),
+        });
+        if (!res.ok) {
+          const body = await res.text().catch(() => "");
+          console.error("[DataSparkChat] getColumns error", res.status, body);
+          throw new Error(`getColumns failed (${res.status})`);
+        }
+        const json = await res.json();
+        const cols: string[] = Array.isArray(json?.columns)
+          ? (json.columns as string[])
+          : [];
+        if (!cancelled) setColumns(cols);
+      } catch (e: any) {
+        if (!cancelled) setColsError(e?.message || "Failed to load columns");
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [bucketUrl, parentId, tableName]);
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
       if (sending) return;
@@ -356,13 +401,21 @@ function DataSparkChat({
     },
     [sending, localQuery, bucketUrl, parentId]
   );
-
   const send = useCallback(async () => {
     const q = localQuery.trim();
     if (!q) return;
     setSending(true);
     try {
       const NEXT_PUBLIC_BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "";
+      console.log(
+        "db_info:\n" +
+          "SQL:\n" +
+          "Table name: " +
+          `${tableName}` +
+          "\nColumns: " +
+          `${columns.join(", ")}` +
+          "\n"
+      );
       const res = await fetch(`${NEXT_PUBLIC_BACKEND_URL}/ask_ai`, {
         method: "POST",
         headers: {
@@ -372,12 +425,12 @@ function DataSparkChat({
         body: JSON.stringify({
           // Always send schema-only bucket_url and the current table name in db_info
           db_info:
-            (bucketUrl
-              ? `bucket_url: ${bucketUrl.split("|>")[0].trim()}`
-              : "") +
-            (bucketUrl.includes("|>")
-              ? ", Current table is " + bucketUrl.split("|>")[1].trim()
-              : ""),
+            "SQL:\n" +
+            "Table name: " +
+            `${tableName}` +
+            "\nColumns: " +
+            `${columns.join(", ")}` +
+            "\n",
           query: q,
           chat_history: chatHistory, // [] in preview calls
           parent_id: parentId, // file.parent_id in preview calls
@@ -421,7 +474,8 @@ function DataSparkChat({
     localQuery,
     chatHistory,
     imageBox,
-    bucketUrl,
+    tableName,
+    columns,
     parentId,
     onAppendHistory,
     onChatChange,
@@ -445,6 +499,9 @@ function DataSparkChat({
               </div>
             </div>
           ))
+        )}
+        {colsError && (
+          <div className="mt-2 text-xs text-red-400">{colsError}</div>
         )}
         {imageBox.length > 0 && (
           <div className="rounded-md border border-neutral-700 bg-neutral-900 p-3">
